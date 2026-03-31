@@ -3,7 +3,7 @@
  *  GUARD SYS — ESP8266 RFID Security System
  *  Web-configurable via built-in HTTP server
  *  Supports: card management, Web Alerts, sensor tuning,
- *            27 alarm tunes, custom message templates
+ *            Wi-Fi config, AP Fallback, custom messages
  *  Dependencies: ESP8266WiFi, ESP8266WebServer,
  *                LittleFS, MFRC522, ArduinoJson
  * ============================================================
@@ -187,13 +187,13 @@ struct CardEntry {
 
 struct Config {
   String  ssid         = "SSID";
-  String  wifiPass     = "PASSWD";
-  String  panelPass    = "admin";
-  int     threshold    = 20;      
-  int     scanInterval = 100;     
-  bool    buzzOnDetect = true;
-  bool    notifyDetect = true;
-  bool    cooldown     = true;
+  String  wifiPass     = "PASSWD";  
+  String  panelPass    = "admin";      
+  int     threshold    = 20;             
+  int     scanInterval = 100;            
+  bool    buzzOnDetect = true;           
+  bool    notifyDetect = true;           
+  bool    cooldown     = true;        
   int     tuneIndex    = 0;       
   int     tuneRepeat   = 1;       
   int     tempoOverride= 0;       
@@ -215,16 +215,13 @@ bool reqTestBuzz   = false;
 bool reqTestTune   = false;
 bool reqArmBeep    = false;
 bool reqDisarmBeep = false;
+bool reqReboot     = false;
 
-// ── Web Alert (modal + siren) ──────────────────────────────────────────────
-// Used for INTRUSION and UNAUTHORIZED CARD — triggers red fullscreen modal
+// ── Web Alerts / Logging ──
 String        currentAlertMsg = "";
 unsigned long alertCounter    = 1;
 unsigned long currentAlertId  = 0;
 
-// ── Web Log (terminal only, no modal) ─────────────────────────────────────
-// Used for ARMED / DISARMED — shows in event log terminal, no siren
-// [FIX] Added these three variables to carry arm/disarm messages to browser
 String        currentLogMsg   = "";
 unsigned long logCounter      = 1;
 unsigned long currentLogId    = 0;
@@ -328,7 +325,7 @@ String applyTemplate(String tmpl, String name="", String distance="", String uid
   tmpl.replace("{NAME}",     name);
   tmpl.replace("{DISTANCE}", distance);
   tmpl.replace("{UID}",      uid);
-  tmpl.replace("{IP}",       WiFi.localIP().toString());
+  tmpl.replace("{IP}",       (WiFi.getMode() == WIFI_AP) ? WiFi.softAPIP().toString() : WiFi.localIP().toString());
   tmpl.replace("{TIME}",     String(millis()/1000) + "s");
   return tmpl;
 }
@@ -340,8 +337,7 @@ void triggerWebAlert(String msg) {
   Serial.println("WEB ALERT: " + msg);
 }
 
-// [FIX] Sends message to browser terminal log ONLY — no modal, no siren
-// Used for ARM / DISARM events so they appear in the web event log
+// Sends message to browser terminal log ONLY — no modal, no siren
 void triggerWebLog(String msg) {
   currentLogMsg = msg;
   currentLogId  = logCounter++;
@@ -385,18 +381,15 @@ void checkAccess(const String& uid) {
     if (systemArmed) {
       beep(1);
       Serial.println("ARMED by " + name);
-      // [FIX] Send ARM message to web terminal using the user's custom template
       triggerWebLog(applyTemplate(cfg.msgArmed, name));
     } else {
       beep(2);
       Serial.println("DISARMED by " + name);
-      // [FIX] Send DISARM message to web terminal using the user's custom template
       triggerWebLog(applyTemplate(cfg.msgDisarmed, name));
     }
   } else {
     tone(buzzerPin, 200, 500);
     Serial.println("Unknown card: " + uid);
-    // Unauthorized card → full alert modal (red screen + siren)
     triggerWebAlert(applyTemplate(cfg.msgUnauth, "", "", uid));
     unsigned long startWait = millis();
     while (millis() - startWait < 500) {
@@ -497,19 +490,17 @@ void handleStatus() {
   if (!isAuthorized()) { sendUnauth(); return; }
   DynamicJsonDocument doc(512);
   doc["armed"]     = systemArmed;
-  doc["ip"]        = WiFi.localIP().toString();
+  doc["ip"]        = (WiFi.getMode() == WIFI_AP) ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
   doc["cards"]     = cfg.cardCount;
   doc["threshold"] = cfg.threshold;
   doc["tune"]      = TUNES[cfg.tuneIndex].name;
   doc["uptime"]    = millis() / 1000;
 
-  // Full-screen modal alert (intrusion / unauthorized card)
   if (currentAlertId != 0) {
     doc["alertId"]  = currentAlertId;
     doc["alertMsg"] = currentAlertMsg;
   }
 
-  // [FIX] Terminal-log event (arm / disarm) — browser shows in event log only
   if (currentLogId != 0) {
     doc["logId"]  = currentLogId;
     doc["logMsg"] = currentLogMsg;
@@ -610,6 +601,7 @@ void handleSaveAccess() {
 void handleGetConfig() {
   if (!isAuthorized()) { sendUnauth(); return; }
   DynamicJsonDocument doc(1024);
+  doc["ssid"]          = cfg.ssid;
   doc["threshold"]     = cfg.threshold; doc["scanInterval"]  = cfg.scanInterval;
   doc["buzzOnDetect"]  = cfg.buzzOnDetect; doc["notifyDetect"]  = cfg.notifyDetect;
   doc["cooldown"]      = cfg.cooldown; doc["tuneIndex"]     = cfg.tuneIndex;
@@ -618,6 +610,15 @@ void handleGetConfig() {
   doc["msgDisarmed"]   = cfg.msgDisarmed; doc["msgAlert"]    = cfg.msgAlert;
   doc["msgUnauth"]     = cfg.msgUnauth;
   String out; serializeJson(doc, out); server.send(200, "application/json", out);
+}
+void handleSaveWifi() {
+  if (!isAuthorized()) { sendUnauth(); return; }
+  cfg.ssid = server.arg("ssid");
+  String p = server.arg("pass");
+  if (p.length() > 0) cfg.wifiPass = p;
+  saveConfig();
+  sendOK("rebooting");
+  reqReboot = true;
 }
 void handleTestBuzz()       { if (!isAuthorized()) { sendUnauth(); return; } reqTestBuzz = true; sendOK(); }
 void handleWebAlertTest()   { if (!isAuthorized()) { sendUnauth(); return; } triggerWebAlert("This is a Web Alert Test!"); sendOK(); }
@@ -725,6 +726,7 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .var-chip{background:rgba(232,160,32,.08);border:1px solid var(--amber-dim);color:var(--amber);font-size:11px;padding:3px 10px;cursor:pointer;letter-spacing:.5px}
 .field textarea{min-height:60px;resize:vertical;line-height:1.6}
 .scan-uid{font-size:14px;color:var(--green);letter-spacing:2px;padding:8px 0;min-height:24px}
+
 /* ALERT MODAL */
 #alert-modal{position:fixed;inset:0;background:rgba(232,64,64,0.9);z-index:9999;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center}
 #alert-modal.show{display:flex;animation:flashBg 1s infinite alternate}
@@ -774,6 +776,7 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
       <div class="nav-item active" onclick="nav('dashboard')"><span>⬡</span> Dashboard</div>
       <div class="nav-item" onclick="nav('cards')"><span>▣</span> Cards</div>
       <div class="sidebar-section">Settings</div>
+      <div class="nav-item" onclick="nav('network')"><span>📶</span> Network</div>
       <div class="nav-item" onclick="nav('sensor')"><span>◎</span> Sensor & Alerts</div>
       <div class="nav-item" onclick="nav('tunes')"><span>♪</span> Alarm Tune</div>
       <div class="nav-item" onclick="nav('messages')"><span>✉</span> Messages</div>
@@ -828,6 +831,18 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
           <div class="field"><label>Role</label><select id="new-role"><option value="admin">Admin</option><option value="user">User</option></select></div>
           <div class="btn-row"><button class="btn btn-amber" onclick="addCard()">ADD CARD</button><button class="btn btn-outline" onclick="startScan()">SCAN NEXT RFID TAP</button></div>
           <div class="scan-uid" id="scan-result"></div>
+        </div>
+      </div>
+
+      <!-- NETWORK -->
+      <div class="panel" id="panel-network">
+        <div class="section-title">Network Settings</div>
+        <div class="section-desc">Connect device to your local Wi-Fi</div>
+        <div class="card">
+          <div class="card-title">Wi-Fi Credentials</div>
+          <div class="field"><label>Wi-Fi SSID</label><input type="text" id="wifi-ssid"></div>
+          <div class="field"><label>Wi-Fi Password</label><input type="password" id="wifi-pass" placeholder="Leave blank to keep unchanged"></div>
+          <button class="btn btn-amber" onclick="saveWifi()">SAVE & REBOOT</button>
         </div>
       </div>
 
@@ -923,8 +938,8 @@ let statusTimer = null;
 let scanPollTimer = null;
 let armed = false;
 let uptimeSec = 0;
+
 let lastAlertId = 0;
-// [FIX] Track last seen log event ID so arm/disarm only displays once
 let lastLogId = 0;
 let isInitialLoad = true;
 
@@ -1003,7 +1018,7 @@ async function refreshStatus(){
     document.getElementById('dash-dist').textContent = d.threshold + ' cm';
     document.getElementById('topbar-ip').textContent = d.ip;
 
-    // ── Full-screen modal alert (intrusion / unauth card) ──────────────
+    // Red Modal Alerts
     if (d.alertId) {
       if (isInitialLoad) {
         lastAlertId = d.alertId;
@@ -1016,16 +1031,11 @@ async function refreshStatus(){
       isInitialLoad = false;
     }
 
-    // [FIX] ── Terminal-only log (arm / disarm events) ──────────────────
-    // Picks up logId + logMsg sent from triggerWebLog() on the device.
-    // On first load we just sync the ID without showing anything (avoids
-    // replaying old arm/disarm events every time the page is opened).
+    // Terminal Logs
     if (d.logId) {
       if (lastLogId === 0) {
-        // First poll — just record where we are, don't display
         lastLogId = d.logId;
       } else if (d.logId !== lastLogId) {
-        // New event since last poll — add to terminal with colour coding
         addLog(d.logMsg, getLogClass(d.logMsg));
         lastLogId = d.logId;
       }
@@ -1034,7 +1044,6 @@ async function refreshStatus(){
   }catch(e){}
 }
 
-// Colour-codes arm/disarm/unauth terminal lines automatically
 function getLogClass(msg) {
   const m = (msg || '').toLowerCase();
   if (m.includes('disarm'))         return 'log-msg-green';
@@ -1142,6 +1151,18 @@ async function saveSensor(){
   }catch(e){toast('Error',true);}
 }
 
+async function saveWifi(){
+  const s = document.getElementById('wifi-ssid').value.trim();
+  const p = document.getElementById('wifi-pass').value;
+  if(!s){toast('SSID cannot be empty',true);return;}
+  if(!confirm('Save Wi-Fi settings and reboot the device?')) return;
+  try{
+    await api('/api/wifi','POST',{ssid: s, pass: p});
+    toast('Rebooting... please reconnect to the network.');
+    setTimeout(() => window.location.reload(), 15000);
+  }catch(e){toast('Error saving Wi-Fi',true);}
+}
+
 async function loadTunes(){
   const d = await api('/api/tunes');
   allTunes = d.tunes; selectedTune = d.selected;
@@ -1182,9 +1203,7 @@ function insertVar(v){
 }
 
 async function changePwd(){
-  const cur=document.getElementById('pwd-current').value;
-  const nw =document.getElementById('pwd-new').value;
-  const cf =document.getElementById('pwd-confirm').value;
+  const cur=document.getElementById('pwd-current').value; const nw =document.getElementById('pwd-new').value; const cf =document.getElementById('pwd-confirm').value;
   if(nw!==cf){toast('Passwords do not match',true);return;}
   try{
     await api('/api/access','POST',{current:cur,newpass:nw});
@@ -1204,7 +1223,8 @@ async function toggleArm(){
 async function loadConfig(){
   try{
     const d = await api('/api/config');
-    document.getElementById('dist-slider').value= d.threshold||20; document.getElementById('dist-label').textContent=(d.threshold||20)+' cm';
+    document.getElementById('wifi-ssid').value    = d.ssid||'';
+    document.getElementById('dist-slider').value  = d.threshold||20; document.getElementById('dist-label').textContent=(d.threshold||20)+' cm';
     document.getElementById('scan-interval').value=d.scanInterval||100;
     document.getElementById('tog-buzz').checked   = d.buzzOnDetect!==false;
     document.getElementById('tog-notify').checked = d.notifyDetect!==false;
@@ -1264,8 +1284,11 @@ void setup() {
 
   Serial.print("Connecting to WiFi: ");
   Serial.println(cfg.ssid);
+  
+  WiFi.mode(WIFI_STA);
   WiFi.begin(cfg.ssid.c_str(), cfg.wifiPass.c_str());
   int tries = 0;
+  // Try for ~20 seconds
   while (WiFi.status() != WL_CONNECTED && tries < 40) {
     delay(500); Serial.print("."); tries++;
   }
@@ -1274,7 +1297,18 @@ void setup() {
     Serial.println("\nWiFi connected. IP: " + WiFi.localIP().toString());
     beep(2);
   } else {
-    Serial.println("\nWiFi failed.");
+    // ── FALLBACK TO AP HOTSPOT ──
+    Serial.println("\nWiFi failed. Starting Configuration Hotspot...");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("GUARD_SYS_SETUP", "M@noV!kas");
+    Serial.println("AP IP address: " + WiFi.softAPIP().toString());
+    
+    // Distinct 4-Note Chime for Hotspot Mode
+    tone(buzzerPin, 262, 150); delay(150); // C4
+    tone(buzzerPin, 330, 150); delay(150); // E4
+    tone(buzzerPin, 392, 150); delay(150); // G4
+    tone(buzzerPin, 523, 400); delay(400); // C5
+    stopBuzzer();
   }
 
   server.on("/",                 HTTP_GET,  handlePanel);
@@ -1286,6 +1320,7 @@ void setup() {
   server.on("/api/cards/remove", HTTP_POST, handleRemoveCard);
   server.on("/api/scan",         HTTP_POST, handleScanRequest);
   server.on("/api/sensor",       HTTP_POST, handleSaveSensor);
+  server.on("/api/wifi",         HTTP_POST, handleSaveWifi);
   server.on("/api/tune",         HTTP_POST, handleSaveTune);
   server.on("/api/tune/test",    HTTP_POST, handleTestTune);
   server.on("/api/tunes",        HTTP_GET,  handleGetTunes);
@@ -1307,6 +1342,11 @@ void loop() {
   server.handleClient();
   checkRFID();
 
+  if (reqReboot) {
+    delay(1000); 
+    ESP.restart();
+  }
+
   if (reqTestBuzz)   { reqTestBuzz   = false; beep(3); }
   if (reqTestTune)   { reqTestTune   = false; playTune(cfg.tuneIndex, 1); }
   if (reqArmBeep)    { reqArmBeep    = false; beep(1); }
@@ -1327,7 +1367,6 @@ void loop() {
 
       if (cfg.notifyDetect && (!messageSent || !cfg.cooldown)) {
         if (cfg.buzzOnDetect) tone(buzzerPin, 3000);
-        // Intrusion → full alert modal (red screen + siren)
         triggerWebAlert(applyTemplate(cfg.msgAlert, "", String(distance)));
         messageSent = true;
         stopBuzzer();
