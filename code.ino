@@ -1,15 +1,20 @@
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h>
-#include <UniversalTelegramBot.h>
-#include <ArduinoJson.h>
 #include <SPI.h>
 #include <MFRC522.h>
 
 // ==========================================
-// 1. RFID & SECURITY CONFIGURATION
+// 1. CONFIGURATION
 // ==========================================
-// REPLACE these with your actual Card IDs
-String validCard1 = "FD 13 14 05"; 
+const char* ssid = "SSID";
+const char* password = "PASSWD";
+
+// Pushover Credentials
+const char* PUSHOVER_USER  = "USER_KEY";  // PASTE USER KEY
+const char* PUSHOVER_TOKEN = "TOKEN"; // PASTE API TOKEN
+
+// RFID Setup
+String validCard1 = "XX XX XX XX"; 
 String validName1 = "Admin One";
 
 String validCard2 = "YY YY YY YY"; 
@@ -19,25 +24,16 @@ String validName2 = "Admin Two";
 bool systemArmed = false; 
 
 // ==========================================
-// 2. NETWORK & TELEGRAM DETAILS
-// ==========================================
-const char* ssid = "SSID";       
-const char* password = "PASSWD"; 
-
-#define BOT_TOKEN "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" 
-#define CHAT_ID "-123456789" 
-
-// ==========================================
-// 3. PIN DEFINITIONS
+// 2. PIN DEFINITIONS
 // ==========================================
 const int trigPin = 5;    // D1
 const int echoPin = 4;    // D2
-const int buzzerPin = 16; // D0 
-#define SS_PIN  15        // D8 
-#define RST_PIN 0         // D3 
+const int buzzerPin = 16; // D0 (GPIO 16)
+#define SS_PIN  15        // D8
+#define RST_PIN 0         // D3
 
 // ==========================================
-// 4. MUSIC NOTES (NOKIA TUNE)
+// 3. NOKIA TUNE SETTINGS
 // ==========================================
 #define NOTE_E5  659
 #define NOTE_D5  587
@@ -62,28 +58,28 @@ int wholenote = (60000 * 4) / tempo;
 int divider = 0, noteDuration = 0;
 
 // ==========================================
-// 5. OBJECTS & VARIABLES
+// 4. GLOBAL OBJECTS
 // ==========================================
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+WiFiClientSecure client;
+
 long duration;
 int distance;
 const int thresholdDistance = 20; 
-
 bool messageSent = false; 
-
-X509List cert(TELEGRAM_CERTIFICATE_ROOT);
-WiFiClientSecure client;
-UniversalTelegramBot bot(BOT_TOKEN, client);
-MFRC522 mfrc522(SS_PIN, RST_PIN); 
 
 void setup() {
   Serial.begin(115200);
-  SPI.begin();         
-  mfrc522.PCD_Init();  
-  
+  SPI.begin();
+  mfrc522.PCD_Init();
+
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
   pinMode(buzzerPin, OUTPUT);
   digitalWrite(buzzerPin, LOW);
+
+  // Startup Sound (Buzz First)
+  tone(buzzerPin, 1000, 200); 
 
   Serial.println();
   Serial.print("Connecting to WiFi: ");
@@ -94,11 +90,11 @@ void setup() {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi connected.");
-  client.setInsecure();
-  
-  // NOTE: Sending a startup message here will delay the loop slightly, that is normal.
-  bot.sendMessage(CHAT_ID, "System Power On. Status: DISARMED.", "");
+  Serial.println("\nWiFi Connected.");
+
+  client.setInsecure(); // Faster connection
+
+  sendPushover("System Online: Guard Ready");
   Serial.println("System Ready.");
 }
 
@@ -113,56 +109,59 @@ void loop() {
       content.concat(String(mfrc522.uid.uidByte[i], HEX));
     }
     content.toUpperCase();
-    content = content.substring(1); 
+    content = content.substring(1);
 
-    Serial.print("Scanned Card: ");
-    Serial.println(content);
-
-    checkAccess(content);
-    
+    // Stop card reading momentarily
     mfrc522.PICC_HaltA();
     mfrc522.PCD_StopCrypto1();
+
+    // Process the card
+    checkAccess(content);
+    
     delay(1000); 
   }
 
   // ----------------------------------------
-  // B. IF ARMED -> CHECK ULTRASONIC
+  // B. SECURITY LOGIC
   // ----------------------------------------
   if (systemArmed) {
-    digitalWrite(trigPin, LOW);
-    delayMicroseconds(2);
-    digitalWrite(trigPin, HIGH);
-    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW); delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH); delayMicroseconds(10);
     digitalWrite(trigPin, LOW);
 
     duration = pulseIn(echoPin, HIGH);
     distance = duration * 0.034 / 2;
 
     if (distance > 0 && distance < thresholdDistance) {
-      // === INTRUDER DETECTED ===
-      Serial.print("Intruder! Distance: ");
-      Serial.println(distance);
-      
-      // 1. BUZZ FIRST (Immediate Alarm)
-      playNokiaTune(); 
-      
-      // 2. SEND MESSAGE SECOND (Only if not sent yet)
+      // === INTRUDER SEQUENCE ===
+      Serial.println("CHILD DETECTED!");
+
+      // 1. BUZZ FIRST (Continuous Scream)
+      // This sound plays WHILE the message is sending
+      tone(buzzerPin, 3000); 
+
+      // 2. SEND MESSAGE
       if (!messageSent) {
-        bot.sendMessage(CHAT_ID, "🚨 INTRUDER ALERT! Motion detected at " + String(distance) + " cm.", "");
+        sendPushover("🚨 ALERT! CHILD BREACH Distance: " + String(distance) + " cm");
         messageSent = true;
       }
 
+      // 3. PLAY NOKIA TUNE (Blocking Alarm)
+      // The 'scream' stops when this melody begins
+      playNokiaTune(); 
+      
     } else {
-      // === ALL CLEAR ===
-      messageSent = false; 
+      // Clear flag when intruder leaves
+      messageSent = false;
+      noTone(buzzerPin);
     }
-  } 
+  }
   
-  delay(100); 
+  delay(100);
 }
 
 // ==========================================
-// HELPER FUNCTIONS
+// FUNCTIONS
 // ==========================================
 
 void checkAccess(String uid) {
@@ -173,33 +172,57 @@ void checkAccess(String uid) {
   
   if (personName != "") {
     // === VALID CARD ===
-    systemArmed = !systemArmed; 
+    systemArmed = !systemArmed;
 
     if (systemArmed) {
-      Serial.println("System ARMED by " + personName);
-      // Beep First
+      // 1. BUZZ FIRST (1 Beep)
       beep(1); 
-      // Send Message Second
-      bot.sendMessage(CHAT_ID, "🛡️ System ARMED by " + personName, "");
+      // 2. SEND MESSAGE
+      Serial.println("ARMED by " + personName);
+      sendPushover("🛡️ ARMED by " + personName);
     } else {
-      Serial.println("System DISARMED by " + personName);
-      // Beep First
+      // 1. BUZZ FIRST (2 Beeps)
       beep(2);
-      // Send Message Second
-      bot.sendMessage(CHAT_ID, "✅ System DISARMED by " + personName, "");
+      // 2. SEND MESSAGE
+      Serial.println("DISARMED by " + personName);
+      sendPushover("✅ DISARMED by " + personName);
     }
   } else {
     // === UNKNOWN CARD ===
-    Serial.println("Access Denied! Unknown Card: " + uid);
-    
-    // Beep First (Error Sound)
+    // 1. BUZZ FIRST (Error Sound)
     tone(buzzerPin, 100); 
-    delay(1000);
-    noTone(buzzerPin);
+    
+    // 2. SEND MESSAGE (While buzzing)
+    Serial.println("Unknown Card: " + uid);
+    sendPushover("🚫 Unauthorized Card: " + uid);
 
-    // Send Message Second
-    String msg = "🚫 WARNING: Unauthorized Access Attempt!\nCard ID: " + uid;
-    bot.sendMessage(CHAT_ID, msg, "");
+    // Stop buzzing after message sent + small delay
+    delay(500); 
+    noTone(buzzerPin);
+  }
+}
+
+void sendPushover(String message) {
+  if (client.connect("api.pushover.net", 443)) {
+    String postData = "token=" + String(PUSHOVER_TOKEN) + 
+                      "&user=" + String(PUSHOVER_USER) + 
+                      "&message=" + message;
+                      
+    client.println("POST /1/messages.json HTTP/1.1");
+    client.println("Host: api.pushover.net");
+    client.println("Connection: close");
+    client.println("Content-Type: application/x-www-form-urlencoded");
+    client.print("Content-Length: ");
+    client.println(postData.length());
+    client.println();
+    client.println(postData);
+    
+    // Quickly flush response to unblock
+    while(client.connected()) {
+      String line = client.readStringUntil('\n');
+      if (line == "\r") break;
+    }
+    client.stop();
   }
 }
 
