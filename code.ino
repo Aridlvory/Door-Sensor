@@ -1,75 +1,255 @@
-/*
- * ESP8266 Ultrasonic Sensor & Buzzer Project
- * 
- * Pin Connections:
- * HC-SR04 Trig -> D1 (GPIO 5)
- * HC-SR04 Echo -> D2 (GPIO 4)
- * Buzzer (+)   -> D5 (GPIO 14)
- * 
- * Logic:
- * If an object is detected closer than the 'thresholdDistance' (e.g., 20cm),
- * the buzzer will turn ON.
- */
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
 
-// Define Pins
+// BUZZER (DOOM)
+#define NOTE_B0  31
+#define NOTE_C1  33
+#define NOTE_CS1 35
+#define NOTE_D1  37
+#define NOTE_DS1 39
+#define NOTE_E1  41
+#define NOTE_F1  44
+#define NOTE_FS1 46
+#define NOTE_G1  49
+#define NOTE_GS1 52
+#define NOTE_A1  55
+#define NOTE_AS1 58
+#define NOTE_B1  62
+#define NOTE_C2  65
+#define NOTE_CS2 69
+#define NOTE_D2  73
+#define NOTE_DS2 78
+#define NOTE_E2  82
+#define NOTE_F2  87
+#define NOTE_FS2 93
+#define NOTE_G2  98
+#define NOTE_GS2 104
+#define NOTE_A2  110
+#define NOTE_AS2 117
+#define NOTE_B2  123
+#define NOTE_C3  131
+#define NOTE_CS3 139
+#define NOTE_D3  147
+#define NOTE_DS3 156
+#define NOTE_E3  165
+#define NOTE_F3  175
+#define NOTE_FS3 185
+#define NOTE_G3  196
+#define NOTE_GS3 208
+#define NOTE_A3  220
+#define NOTE_AS3 233
+#define NOTE_B3  247
+#define NOTE_C4  262
+#define NOTE_CS4 277
+#define NOTE_D4  294
+#define NOTE_DS4 311
+#define NOTE_E4  330
+#define NOTE_F4  349
+#define NOTE_FS4 370
+#define NOTE_G4  392
+#define NOTE_GS4 415
+#define NOTE_A4  440
+#define NOTE_AS4 466
+#define NOTE_B4  494
+#define NOTE_C5  523
+#define NOTE_CS5 554
+#define NOTE_D5  587
+#define NOTE_DS5 622
+#define NOTE_E5  659
+#define NOTE_F5  698
+#define NOTE_FS5 740
+#define NOTE_G5  784
+#define NOTE_GS5 831
+#define NOTE_A5  880
+#define NOTE_AS5 932
+#define NOTE_B5  988
+#define NOTE_C6  1047
+#define NOTE_CS6 1109
+#define NOTE_D6  1175
+#define NOTE_DS6 1245
+#define NOTE_E6  1319
+#define NOTE_F6  1397
+#define NOTE_FS6 1480
+#define NOTE_G6  1568
+#define NOTE_GS6 1661
+#define NOTE_A6  1760
+#define NOTE_AS6 1865
+#define NOTE_B6  1976
+#define NOTE_C7  2093
+#define NOTE_CS7 2217
+#define NOTE_D7  2349
+#define NOTE_DS7 2489
+#define NOTE_E7  2637
+#define NOTE_F7  2794
+#define NOTE_FS7 2960
+#define NOTE_G7  3136
+#define NOTE_GS7 3322
+#define NOTE_A7  3520
+#define NOTE_AS7 3729
+#define NOTE_B7  3951
+#define NOTE_C8  4186
+#define NOTE_CS8 4435
+#define NOTE_D8  4699
+#define NOTE_DS8 4978
+#define REST      0
+
+
+// change this to make the song slower or faster
+int tempo = 180;
+
+// notes of the moledy followed by the duration.
+// a 4 means a quarter note, 8 an eighteenth , 16 sixteenth, so on
+// !!negative numbers are used to represent dotted notes,
+// so -4 means a dotted quarter note, that is, a quarter plus an eighteenth!!
+int melody[] = {
+
+  // Nokia Ringtone 
+  // Score available at https://musescore.com/user/29944637/scores/5266155
+  
+  NOTE_E5, 8, NOTE_D5, 8, NOTE_FS4, 4, NOTE_GS4, 4, 
+  NOTE_CS5, 8, NOTE_B4, 8, NOTE_D4, 4, NOTE_E4, 4, 
+  NOTE_B4, 8, NOTE_A4, 8, NOTE_CS4, 4, NOTE_E4, 4,
+  NOTE_A4, 2, 
+};
+
+// sizeof gives the number of bytes, each int value is composed of two bytes (16 bits)
+// there are two values per note (pitch and duration), so for each note there are four bytes
+int notes = sizeof(melody) / sizeof(melody[0]) / 2;
+
+// this calculates the duration of a whole note in ms
+int wholenote = (60000 * 4) / tempo;
+
+int divider = 0, noteDuration = 0;
+
+// DOOOOOOOM
+
+// ==========================================
+// YOUR NETWORK & TELEGRAM DETAILS
+// ==========================================
+const char* ssid = "FTTH@1";       // Enter your WiFi Name
+const char* password = "hima2004"; // Enter your WiFi Password
+
+// Telegram BOT Token (Get from BotFather)
+#define BOT_TOKEN "7994201416:AAE0aEMzGL_oDu6gYZ694-UbfkobkQ7YO5A" 
+// Your User ID (Get from IDBot)
+#define CHAT_ID "6413098342" 
+
+// ==========================================
+// PIN DEFINITIONS
+// ==========================================
 const int trigPin = 5;  // D1
 const int echoPin = 4;  // D2
 const int buzzerPin = 14; // D5
 
-// Variables for measurement
+// ==========================================
+// VARIABLES
+// ==========================================
 long duration;
 int distance;
+const int thresholdDistance = 20; // cm
 
-// Threshold distance in cm to trigger buzzer
-const int thresholdDistance = 20; 
+// Logic to prevent spamming Telegram
+bool objectPresent = false;       // Tracks if object is currently there
+bool messageSent = false;         // Tracks if we already warned the user
+
+// Telegram Objects
+X509List cert(TELEGRAM_CERTIFICATE_ROOT);
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOT_TOKEN, client);
 
 void setup() {
-  // Start Serial Monitor
-  Serial.begin(115200); 
+  Serial.begin(115200);
 
-  // Set pin modes
+  // Pin Setup
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
   pinMode(buzzerPin, OUTPUT);
-
-  // Ensure buzzer is off initially
   digitalWrite(buzzerPin, LOW);
+
+  // WiFi Connection
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected.");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Essential for ESP8266 Telegram (skips complex certificate checks)
+  client.setInsecure();
   
-  Serial.println("System Initialized");
+  // Send a startup message
+  bot.sendMessage(CHAT_ID, "System Online: Ultrasonic Guard Active", "");
 }
 
 void loop() {
-  // Clear the trigPin
+  // 1. Measure Distance
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-
-  // Send a 10 microsecond pulse to trigger the sensor
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
 
-  // Measure the duration of the incoming pulse on Echo pin
   duration = pulseIn(echoPin, HIGH);
-
-  // Calculate distance: Distance = (Time * Speed of Sound) / 2
-  // Speed of sound is approx 0.034 cm/microsecond
   distance = duration * 0.034 / 2;
 
-  // Print distance to Serial Monitor
-  Serial.print("Distance: ");
-  Serial.print(distance);
-  Serial.println(" cm");
-
-  // Logic to control the Buzzer
+  // 2. Check Logic
   if (distance > 0 && distance < thresholdDistance) {
-    // Object detected within range!
-    digitalWrite(buzzerPin, HIGH); // Turn Buzzer ON
-    Serial.println("Object Detected! Buzzer ON");
+    // === OBJECT DETECTED ===
+    
+    // Buzz continuously while object is there
+    buzz();
+    objectPresent = true;
+
+    // Send Telegram ONLY if we haven't sent one for this specific detection event
+    if (!messageSent) {
+      Serial.println("Object Detected! Sending Telegram...");
+      String message = "⚠️ ALERT! Object detected at " + String(distance) + " cm.";
+      bot.sendMessage(CHAT_ID, message, "");
+      messageSent = true; // Lock the message sender
+    }
+    
   } else {
-    // No object or out of range
-    digitalWrite(buzzerPin, LOW);  // Turn Buzzer OFF
+    // === NO OBJECT ===
+    
+    digitalWrite(buzzerPin, LOW); // Turn off buzzer
+    objectPresent = false;
+    messageSent = false; // Reset the lock so we can alert again next time
   }
 
-  // specific delay to avoid spamming the sensor
+  // Small delay to keep the loop stable
   delay(100); 
+}
+
+void buzz() {
+  // iterate over the notes of the melody.
+  // Remember, the array is twice the number of notes (notes + durations)
+  for (int thisNote = 0; thisNote < notes * 2; thisNote = thisNote + 2) {
+
+    // calculates the duration of each note
+    divider = melody[thisNote + 1];
+    if (divider > 0) {
+      // regular note, just proceed
+      noteDuration = (wholenote) / divider;
+    } else if (divider < 0) {
+      // dotted notes are represented with negative durations!!
+      noteDuration = (wholenote) / abs(divider);
+      noteDuration *= 1.5; // increases the duration in half for dotted notes
+    }
+
+    // we only play the note for 90% of the duration, leaving 10% as a pause
+    tone(buzzerPin, melody[thisNote], noteDuration * 0.9);
+
+    // Wait for the specief duration before playing the next note.
+    delay(noteDuration);
+
+    // stop the waveform generation before the next note.
+    noTone(buzzerPin);
+  }
 }
