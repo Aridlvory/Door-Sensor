@@ -186,9 +186,9 @@ struct CardEntry {
 };
 
 struct Config {
-  String  ssid         = "SSID";
-  String  wifiPass     = "PASSWD";  
-  String  panelPass    = "admin";      
+  String  ssid         = "SSID";   // Change SSID Here
+  String  wifiPass     = "PASSWD"; // Change Password here
+  String  panelPass    = "admin";  // Default Panel Password
   int     threshold    = 20;             
   int     scanInterval = 100;            
   bool    buzzOnDetect = true;           
@@ -1300,7 +1300,7 @@ void setup() {
     // ── FALLBACK TO AP HOTSPOT ──
     Serial.println("\nWiFi failed. Starting Configuration Hotspot...");
     WiFi.mode(WIFI_AP);
-    WiFi.softAP("GUARD_SYS_SETUP", "M@noV!kas");
+    WiFi.softAP("GUARD_SYS_SETUP", "PASSWORD");    // Change Hotspot and Wi-Fi Password here
     Serial.println("AP IP address: " + WiFi.softAPIP().toString());
     
     // Distinct 4-Note Chime for Hotspot Mode
